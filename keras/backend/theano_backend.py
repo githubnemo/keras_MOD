@@ -1,29 +1,25 @@
 import theano
 from theano import tensor as T
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
-from theano.tensor.signal import downsample
+from theano.tensor.signal import pool
 from theano.tensor.nnet import conv3d2d
+try:
+    from theano.tensor.nnet.nnet import softsign as T_softsign
+except ImportError:
+    from theano.sandbox.softsign import softsign as T_softsign
+import inspect
 import numpy as np
 from .common import _FLOATX, _EPSILON
 
 
 # INTERNAL UTILS
 theano.config.floatX = _FLOATX
+_LEARNING_PHASE = T.scalar(dtype='uint8', name='keras_learning_phase')  # 0 = test, 1 = train
 
 
-def _on_gpu():
-    '''Return whether the session is set to
-    run on GPU or not (i.e. on CPU).
-    '''
-    return theano.config.device[:3] == 'gpu' or theano.sandbox.cuda.cuda_enabled
-
-
-if _on_gpu():
-    '''Import cuDNN only if running on GPU:
-    not having Cuda installed should not
-    prevent from running the present code.
-    '''
-    from theano.sandbox.cuda import dnn
+def learning_phase():
+    # False = test, True = train
+    return _LEARNING_PHASE
 
 
 # VARIABLE MANIPULATION
@@ -42,9 +38,14 @@ def placeholder(shape=None, ndim=None, dtype=_FLOATX, name=None):
         raise Exception('Specify either a shape or ndim value.')
     if shape is not None:
         ndim = len(shape)
+    else:
+        shape = tuple([None for _ in range(ndim)])
 
     broadcast = (False,) * ndim
-    return T.TensorType(dtype, broadcast)(name)
+    x = T.TensorType(dtype, broadcast)(name)
+    x._keras_shape = shape
+    x._uses_learning_phase = False
+    return x
 
 
 def shape(x):
@@ -58,6 +59,10 @@ def shape(x):
 
 def ndim(x):
     return x.ndim
+
+
+def dtype(x):
+    return x.dtype
 
 
 def eval(x):
@@ -76,6 +81,12 @@ def ones(shape, dtype=_FLOATX, name=None):
     '''Instantiate an all-ones variable.
     '''
     return variable(np.ones(shape), dtype, name)
+
+
+def eye(size, dtype=_FLOATX, name=None):
+    '''Instantiate an identity matrix.
+    '''
+    return variable(np.eye(size), dtype, name)
 
 
 def ones_like(x):
@@ -108,6 +119,38 @@ Assumed overridden:
 
 def dot(x, y):
     return T.dot(x, y)
+
+
+def batch_dot(x, y, axes=None):
+    '''batchwise dot product
+    batch_dot results in a tensor with less dimensions than the input.
+    If the number of dimensions is reduced to 1, we use `expand_dims` to
+    make sure that ndim is at least 2.
+
+    # Example
+        Assume x = [[1, 2]   and y = [[5, 6]
+                    [3, 4]]           [7, 8]]
+        batch_dot(x, y, axes=1) = [[17, 53]] which is the main diagonal
+        of x.dot(y.T), although we never have to calculate the off-diagonal
+        elements.
+
+
+    # Arguments
+        x, y: tensors with ndim >= 2
+        axes: list (or single) int with target dimensions
+
+    # Returns
+        Tensor with ndim >= 2
+    '''
+    if type(axes) == int:
+        axes = (axes, axes)
+    if axes is None:
+        # behaves like tf.batch_matmul as default
+        axes = [x.ndim - 1, y.ndim - 2]
+    out = T.batched_tensordot(x, y, axes=axes)
+    if ndim(out) == 1:
+        out = expand_dims(out, 1)
+    return out
 
 
 def transpose(x):
@@ -147,11 +190,18 @@ def prod(x, axis=None, keepdims=False):
 
 
 def mean(x, axis=None, keepdims=False):
-    return T.mean(x, axis=axis, keepdims=keepdims)
+    dtype = None
+    if 'int' in x.dtype:
+        dtype = _FLOATX
+    return T.mean(x, axis=axis, keepdims=keepdims, dtype=dtype)
 
 
 def std(x, axis=None, keepdims=False):
     return T.std(x, axis=axis, keepdims=keepdims)
+
+
+def var(x, axis=None, keepdims=False):
+    return T.var(x, axis=axis, keepdims=keepdims)
 
 
 def any(x, axis=None, keepdims=False):
@@ -193,6 +243,10 @@ def round(x):
     return T.round(x)
 
 
+def sign(x):
+    return T.sgn(x)
+
+
 def pow(x, a):
     return T.pow(x, a)
 
@@ -217,6 +271,14 @@ def maximum(x, y):
 
 def minimum(x, y):
     return T.minimum(x, y)
+
+
+def sin(x):
+    return T.sin(x)
+
+
+def cos(x):
+    return T.cos(x)
 
 
 # SHAPE OPERATIONS
@@ -331,15 +393,18 @@ def expand_dims(x, dim=-1):
 def squeeze(x, axis):
     '''Remove a 1-dimension from the tensor at index "axis".
     '''
-    x = T.addbroadcast(x, axis)
-    return T.squeeze(x)
+    broadcastable = x.broadcastable[:axis] + x.broadcastable[axis+1:]
+    x = T.patternbroadcast(x, [i == axis for i in range(x.type.ndim)])
+    x = T.squeeze(x)
+    x = T.patternbroadcast(x, broadcastable)
+    return x
 
 
 def temporal_padding(x, padding=1):
     '''Pad the middle dimension of a 3D tensor
     with "padding" zeros left and right.
 
-    Appologies for the inane API, but Theano makes this
+    Apologies for the inane API, but Theano makes this
     really hard.
     '''
     input_shape = x.shape
@@ -416,6 +481,9 @@ def spatial_3d_padding(x, padding=(1, 1, 1), dim_ordering='th'):
     return T.set_subtensor(output[indices], x)
 
 
+def pack(x):
+    return T.stack(*x)
+
 # VALUE MANIPULATION
 
 
@@ -426,8 +494,20 @@ def get_value(x):
     return x.get_value()
 
 
+def batch_get_value(xs):
+    '''Returns the value of more than one tensor variable,
+    as a list of Numpy arrays.
+    '''
+    return [get_value(x) for x in xs]
+
+
 def set_value(x, value):
     x.set_value(np.asarray(value, dtype=x.dtype))
+
+
+def batch_set_value(tuples):
+    for x, value in tuples:
+        x.set_value(np.asarray(value, dtype=x.dtype))
 
 
 # GRAPH MANIPULATION
@@ -436,15 +516,23 @@ class Function(object):
 
     def __init__(self, inputs, outputs, updates=[], **kwargs):
         self.function = theano.function(inputs, outputs, updates=updates,
-                                        allow_input_downcast=True, **kwargs)
+                                        allow_input_downcast=True,
+                                        on_unused_input='warn',
+                                        **kwargs)
 
     def __call__(self, inputs):
         assert type(inputs) in {list, tuple}
         return self.function(*inputs)
 
 
-def function(inputs, outputs, updates=[]):
-    return Function(inputs, outputs, updates=updates)
+def function(inputs, outputs, updates=[], **kwargs):
+    if len(kwargs) > 0:
+        function_args = inspect.getargspec(theano.function)[0]
+        for key in kwargs.keys():
+            if key not in function_args:
+                msg = "Invalid argument '%s' passed to K.function" % key
+                raise ValueError(msg)
+    return Function(inputs, outputs, updates=updates, **kwargs)
 
 
 def gradients(loss, variables):
@@ -454,45 +542,56 @@ def gradients(loss, variables):
 # CONTROL FLOW
 
 def rnn(step_function, inputs, initial_states,
-        go_backwards=False, mask=None, constants=None):
+        go_backwards=False, mask=None, constants=None,
+        unroll=False, input_length=None):
     '''Iterates over the time dimension of a tensor.
-    Parameters
-    ----------
-    inputs: tensor of temporal data of shape (samples, time, ...)
-        (at least 3D).
-    step_function:
-        Parameters:
-            input: tensor with shape (samples, ...) (no time dimension),
-                representing input for the batch of samples at a certain
-                time step.
-            states: list of tensors.
-        Returns:
-            output: tensor with shape (samples, ...) (no time dimension),
-            new_states: list of tensors, same length and shapes
-                as 'states'.
-    initial_states: tensor with shape (samples, ...) (no time dimension),
-        containing the initial values for the states used in
-        the step function.
-    go_backwards: boolean. If True, do the iteration over
-        the time dimension in reverse order.
-    mask: binary tensor with shape (samples, time),
-        with a zero for every element that is masked.
-    constants: a list of constant values passed at each step.
-    Returns
-    -------
-    A tuple (last_output, outputs, new_states).
-        last_output: the latest output of the rnn, of shape (samples, ...)
-        outputs: tensor with shape (samples, time, ...) where each
-            entry outputs[s, t] is the output of the step function
-            at time t for sample s.
-        new_states: list of tensors, latest states returned by
-            the step function, of shape (samples, ...).
+
+    # Arguments
+        inputs: tensor of temporal data of shape (samples, time, ...)
+            (at least 3D).
+        step_function:
+            Parameters:
+                input: tensor with shape (samples, ...) (no time dimension),
+                    representing input for the batch of samples at a certain
+                    time step.
+                states: list of tensors.
+            Returns:
+                output: tensor with shape (samples, ...) (no time dimension),
+                new_states: list of tensors, same length and shapes
+                    as 'states'.
+        initial_states: tensor with shape (samples, ...) (no time dimension),
+            containing the initial values for the states used in
+            the step function.
+        go_backwards: boolean. If True, do the iteration over
+            the time dimension in reverse order.
+        mask: binary tensor with shape (samples, time),
+            with a zero for every element that is masked.
+        constants: a list of constant values passed at each step.
+        unroll: whether to unroll the RNN or to use a symbolic loop (`scan`).
+        input_length: must be specified if using `unroll`.
+
+    # Returns
+        A tuple (last_output, outputs, new_states).
+            last_output: the latest output of the rnn, of shape (samples, ...)
+            outputs: tensor with shape (samples, time, ...) where each
+                entry outputs[s, t] is the output of the step function
+                at time t for sample s.
+            new_states: list of tensors, latest states returned by
+                the step function, of shape (samples, ...).
     '''
     ndim = inputs.ndim
     assert ndim >= 3, 'Input should be at least 3D.'
 
+    if unroll:
+        if input_length is None:
+            raise Exception('When specifying `unroll=True`, an `input_length` '
+                            'must be provided to `rnn`.')
+
     axes = [1, 0] + list(range(2, ndim))
     inputs = inputs.dimshuffle(axes)
+
+    if constants is None:
+        constants = []
 
     if mask is not None:
         if mask.ndim == ndim-1:
@@ -500,47 +599,101 @@ def rnn(step_function, inputs, initial_states,
         assert mask.ndim == ndim
         mask = mask.dimshuffle(axes)
 
-        if constants is None:
-            constants = []
-        # build an all-zero tensor of shape (samples, output_dim)
-        initial_output = step_function(inputs[0], initial_states + constants)[0] * 0
-        # Theano gets confused by broadcasting patterns in the scan op
-        initial_output = T.unbroadcast(initial_output, 0, 1)
+        if unroll:
+            indices = list(range(input_length))
+            if go_backwards:
+                indices = indices[::-1]
 
-        def _step(input, mask, output_tm1, *states):
-            output, new_states = step_function(input, states)
-            # output previous output if masked.
-            output = T.switch(mask, output, output_tm1)
-            return_states = []
-            for state, new_state in zip(states, new_states):
-                return_states.append(T.switch(mask, new_state, state))
-            return [output] + return_states
+            successive_outputs = []
+            successive_states = []
+            states = initial_states
+            for i in indices:
+                output, new_states = step_function(inputs[i], states + constants)
 
-        results, _ = theano.scan(
-            _step,
-            sequences=[inputs, mask],
-            outputs_info=[initial_output] + initial_states,
-            non_sequences=constants,
-            go_backwards=go_backwards)
+                if len(successive_outputs) == 0:
+                    prev_output = zeros_like(output)
+                else:
+                    prev_output = successive_outputs[-1]
+
+                output = T.switch(mask[i], output, prev_output)
+                kept_states = []
+                for state, new_state in zip(states, new_states):
+                    kept_states.append(T.switch(mask[i], new_state, state))
+                states = kept_states
+
+                successive_outputs.append(output)
+                successive_states.append(states)
+
+            outputs = T.stack(*successive_outputs)
+            states = []
+            for i in range(len(successive_states[-1])):
+                states.append(T.stack(*[states_at_step[i] for states_at_step in successive_states]))
+        else:
+            # build an all-zero tensor of shape (samples, output_dim)
+            initial_output = step_function(inputs[0], initial_states + constants)[0] * 0
+            # Theano gets confused by broadcasting patterns in the scan op
+            initial_output = T.unbroadcast(initial_output, 0, 1)
+
+            def _step(input, mask, output_tm1, *states):
+                output, new_states = step_function(input, states)
+                # output previous output if masked.
+                output = T.switch(mask, output, output_tm1)
+                return_states = []
+                for state, new_state in zip(states, new_states):
+                    return_states.append(T.switch(mask, new_state, state))
+                return [output] + return_states
+
+            results, _ = theano.scan(
+                _step,
+                sequences=[inputs, mask],
+                outputs_info=[initial_output] + initial_states,
+                non_sequences=constants,
+                go_backwards=go_backwards)
+
+            # deal with Theano API inconsistency
+            if type(results) is list:
+                outputs = results[0]
+                states = results[1:]
+            else:
+                outputs = results
+                states = []
     else:
-        def _step(input, *states):
-            output, new_states = step_function(input, states)
-            return [output] + new_states
+        if unroll:
+            indices = list(range(input_length))
+            if go_backwards:
+                indices = indices[::-1]
 
-        results, _ = theano.scan(
-            _step,
-            sequences=inputs,
-            outputs_info=[None] + initial_states,
-            non_sequences=constants,
-            go_backwards=go_backwards)
+            successive_outputs = []
+            successive_states = []
+            states = initial_states
+            for i in indices:
+                output, states = step_function(inputs[i], states + constants)
+                successive_outputs.append(output)
+                successive_states.append(states)
+            outputs = T.stack(*successive_outputs)
+            states = []
+            for i in range(len(successive_states[-1])):
+                states.append(T.stack(*[states_at_step[i] for states_at_step in successive_states]))
 
-    # deal with Theano API inconsistency
-    if type(results) is list:
-        outputs = results[0]
-        states = results[1:]
-    else:
-        outputs = results
-        states = []
+        else:
+            def _step(input, *states):
+                output, new_states = step_function(input, states)
+                return [output] + new_states
+
+            results, _ = theano.scan(
+                _step,
+                sequences=inputs,
+                outputs_info=[None] + initial_states,
+                non_sequences=constants,
+                go_backwards=go_backwards)
+
+            # deal with Theano API inconsistency
+            if type(results) is list:
+                outputs = results[0]
+                states = results[1:]
+            else:
+                outputs = results
+                states = []
 
     outputs = T.squeeze(outputs)
     last_output = outputs[-1]
@@ -555,6 +708,18 @@ def switch(condition, then_expression, else_expression):
     '''condition: scalar tensor.
     '''
     return T.switch(condition, then_expression, else_expression)
+
+
+def in_train_phase(x, alt):
+    x = T.switch(_LEARNING_PHASE, x, alt)
+    x._uses_learning_phase = True
+    return x
+
+
+def in_test_phase(x, alt):
+    x = T.switch(_LEARNING_PHASE, alt, x)
+    x._uses_learning_phase = True
+    return x
 
 
 # NN OPERATIONS
@@ -578,6 +743,10 @@ def softplus(x):
     return T.nnet.softplus(x)
 
 
+def softsign(x):
+    return T_softsign(x)
+
+
 def categorical_crossentropy(output, target, from_logits=False):
     if from_logits:
         output = T.nnet.softmax(output)
@@ -587,6 +756,13 @@ def categorical_crossentropy(output, target, from_logits=False):
     # avoid numerical instability with _EPSILON clipping
     output = T.clip(output, _EPSILON, 1.0 - _EPSILON)
     return T.nnet.categorical_crossentropy(output, target)
+
+
+def sparse_categorical_crossentropy(output, target, from_logits=False):
+    target = T.cast(T.flatten(target), 'int32')
+    target = T.extra_ops.to_one_hot(target, nb_class=output.shape[-1])
+    target = reshape(target, shape(output))
+    return categorical_crossentropy(output, target, from_logits)
 
 
 def binary_crossentropy(output, target, from_logits=False):
@@ -613,7 +789,7 @@ def dropout(x, level, seed=None):
     if level < 0. or level >= 1:
         raise Exception('Dropout level must be in interval [0, 1[.')
     if seed is None:
-        seed = np.random.randint(10e6)
+        seed = np.random.randint(1, 10e6)
     rng = RandomStreams(seed=seed)
     retain_prob = 1. - level
     x *= rng.binomial(x.shape, p=retain_prob, dtype=x.dtype)
@@ -631,7 +807,6 @@ def l2_normalize(x, axis):
 def conv2d(x, kernel, strides=(1, 1), border_mode='valid', dim_ordering='th',
            image_shape=None, filter_shape=None):
     '''
-    Run on cuDNN if available.
     border_mode: string, "same" or "valid".
     '''
     if dim_ordering not in {'th', 'tf'}:
@@ -653,58 +828,46 @@ def conv2d(x, kernel, strides=(1, 1), border_mode='valid', dim_ordering='th',
             filter_shape = (filter_shape[3], filter_shape[2],
                             filter_shape[0], filter_shape[1])
 
-    if _on_gpu() and dnn.dnn_available():
-        if border_mode == 'same':
-            np_kernel = kernel.eval()
-            assert strides[0] <= np_kernel.shape[2], 'strides should be smaller than the convolution window.'
-            assert strides[1] <= np_kernel.shape[3], 'strides should be smaller than the convolution window.'
-            conv_out = dnn.dnn_conv(img=x,
-                                    kerns=kernel,
-                                    border_mode='full')
-            shift_x = (np_kernel.shape[2] - strides[0]) // 2
-            shift_y = (np_kernel.shape[3] - strides[1]) // 2
-            expected_width = (x.shape[2] + strides[0] - 1) // strides[0]
-            expected_height = (x.shape[3] + strides[1] - 1) // strides[1]
-
-            conv_out = conv_out[:, :,
-                                shift_x: shift_x + expected_width,
-                                shift_y: shift_y + expected_height]
-        else:
-            conv_out = dnn.dnn_conv(img=x,
-                                    kerns=kernel,
-                                    border_mode=border_mode,
-                                    subsample=strides)
+    if border_mode == 'same':
+        th_border_mode = 'half'
+        np_kernel = kernel.eval()
+    elif border_mode == 'valid':
+        th_border_mode = 'valid'
     else:
-        if border_mode == 'same':
-            th_border_mode = 'full'
-            np_kernel = kernel.eval()
-            assert strides[0] <= np_kernel.shape[2], 'strides should be smaller than the convolution window.'
-            assert strides[1] <= np_kernel.shape[3], 'strides should be smaller than the convolution window.'
-        elif border_mode == 'valid':
-            th_border_mode = 'valid'
-        else:
-            raise Exception('Border mode not supported: ' + str(border_mode))
+        raise Exception('Border mode not supported: ' + str(border_mode))
 
-        conv_out = T.nnet.conv.conv2d(x, kernel,
-                                      border_mode=th_border_mode,
-                                      subsample=strides,
-                                      image_shape=image_shape,
-                                      filter_shape=filter_shape)
-        if border_mode == 'same':
-            shift_x = (np_kernel.shape[2] - strides[0]) // 2
-            shift_y = (np_kernel.shape[3] - strides[1]) // 2
-            expected_width = (x.shape[2] + strides[0] - 1) // strides[0]
-            expected_height = (x.shape[3] + strides[1] - 1) // strides[1]
+    # Theano might not accept long type
+    def int_or_none(value):
+        try:
+            return int(value)
+        except TypeError:
+            return None
 
-            conv_out = conv_out[:, :,
-                                shift_x: shift_x + expected_width,
-                                shift_y: shift_y + expected_height]
+    if image_shape is not None:
+        image_shape = tuple(int_or_none(v) for v in image_shape)
+
+    if filter_shape is not None:
+        filter_shape = tuple(int_or_none(v) for v in filter_shape)
+
+    conv_out = T.nnet.conv2d(x, kernel,
+                             border_mode=th_border_mode,
+                             subsample=strides,
+                             input_shape=image_shape,
+                             filter_shape=filter_shape)
+
+    if border_mode == 'same':
+        if np_kernel.shape[2] % 2 == 0:
+            conv_out = conv_out[:, :, :(x.shape[2] + strides[0] - 1) // strides[0], :]
+        if np_kernel.shape[3] % 2 == 0:
+            conv_out = conv_out[:, :, :, :(x.shape[3] + strides[1] - 1) // strides[1]]
+
     if dim_ordering == 'tf':
         conv_out = conv_out.dimshuffle((0, 2, 3, 1))
     return conv_out
 
 
-def conv3d(x, kernel, strides=(1, 1, 1), border_mode='valid', dim_ordering='th',
+def conv3d(x, kernel, strides=(1, 1, 1),
+           border_mode='valid', dim_ordering='th',
            volume_shape=None, filter_shape=None):
     '''
     Run on cuDNN if available.
@@ -783,15 +946,15 @@ def pool2d(x, pool_size, strides=(1, 1), border_mode='valid',
         x = x.dimshuffle((0, 3, 1, 2))
 
     if pool_mode == 'max':
-        pool_out = downsample.max_pool_2d(x, ds=pool_size, st=strides,
-                                          ignore_border=True,
-                                          padding=padding,
-                                          mode='max')
+        pool_out = pool.pool_2d(x, ds=pool_size, st=strides,
+                                ignore_border=True,
+                                padding=padding,
+                                mode='max')
     elif pool_mode == 'avg':
-        pool_out = downsample.max_pool_2d(x, ds=pool_size, st=strides,
-                                          ignore_border=True,
-                                          padding=padding,
-                                          mode='average_exc_pad')
+        pool_out = pool.pool_2d(x, ds=pool_size, st=strides,
+                                ignore_border=True,
+                                padding=padding,
+                                mode='average_exc_pad')
     else:
         raise Exception('Invalid pooling mode: ' + str(pool_mode))
 
@@ -827,37 +990,37 @@ def pool3d(x, pool_size, strides=(1, 1, 1), border_mode='valid',
 
     if pool_mode == 'max':
         # pooling over conv_dim2, conv_dim1 (last two channels)
-        output = downsample.max_pool_2d(input=x.dimshuffle(0, 1, 4, 3, 2),
-                                        ds=(pool_size[1], pool_size[0]),
-                                        st=(strides[1], strides[0]),
-                                        ignore_border=ignore_border,
-                                        padding=padding,
-                                        mode='max')
+        output = pool.pool_2d(input=x.dimshuffle(0, 1, 4, 3, 2),
+                              ds=(pool_size[1], pool_size[0]),
+                              st=(strides[1], strides[0]),
+                              ignore_border=ignore_border,
+                              padding=padding,
+                              mode='max')
 
         # pooling over conv_dim3
-        pool_out = downsample.max_pool_2d(input=output.dimshuffle(0, 1, 4, 3, 2),
-                                          ds=(1, pool_size[2]),
-                                          st=(1, strides[2]),
-                                          ignore_border=ignore_border,
-                                          padding=padding,
-                                          mode='max')
+        pool_out = pool.pool_2d(input=output.dimshuffle(0, 1, 4, 3, 2),
+                                ds=(1, pool_size[2]),
+                                st=(1, strides[2]),
+                                ignore_border=ignore_border,
+                                padding=padding,
+                                mode='max')
 
     elif pool_mode == 'avg':
         # pooling over conv_dim2, conv_dim1 (last two channels)
-        output = downsample.max_pool_2d(input=x.dimshuffle(0, 1, 4, 3, 2),
-                                        ds=(pool_size[1], pool_size[0]),
-                                        st=(strides[1], strides[0]),
-                                        ignore_border=ignore_border,
-                                        padding=padding,
-                                        mode='average_exc_pad')
+        output = pool.pool_2d(input=x.dimshuffle(0, 1, 4, 3, 2),
+                              ds=(pool_size[1], pool_size[0]),
+                              st=(strides[1], strides[0]),
+                              ignore_border=ignore_border,
+                              padding=padding,
+                              mode='average_exc_pad')
 
         # pooling over conv_dim3
-        pool_out = downsample.max_pool_2d(input=output.dimshuffle(0, 1, 4, 3, 2),
-                                          ds=(1, pool_size[2]),
-                                          st=(1, strides[2]),
-                                          ignore_border=ignore_border,
-                                          padding=padding,
-                                          mode='average_exc_pad')
+        pool_out = pool.pool_2d(input=output.dimshuffle(0, 1, 4, 3, 2),
+                                ds=(1, pool_size[2]),
+                                st=(1, strides[2]),
+                                ignore_border=ignore_border,
+                                padding=padding,
+                                mode='average_exc_pad')
     else:
         raise Exception('Invalid pooling mode: ' + str(pool_mode))
 
@@ -871,27 +1034,20 @@ def pool3d(x, pool_size, strides=(1, 1, 1), border_mode='valid',
 
 def random_normal(shape, mean=0.0, std=1.0, dtype=_FLOATX, seed=None):
     if seed is None:
-        seed = np.random.randint(10e6)
+        seed = np.random.randint(1, 10e6)
     rng = RandomStreams(seed=seed)
     return rng.normal(size=shape, avg=mean, std=std, dtype=dtype)
 
 
 def random_uniform(shape, low=0.0, high=1.0, dtype=_FLOATX, seed=None):
     if seed is None:
-        seed = np.random.randint(10e6)
+        seed = np.random.randint(1, 10e6)
     rng = RandomStreams(seed=seed)
     return rng.uniform(shape, low=low, high=high, dtype=dtype)
 
 
 def random_binomial(shape, p=0.0, dtype=_FLOATX, seed=None):
     if seed is None:
-        seed = np.random.randint(10e6)
+        seed = np.random.randint(1, 10e6)
     rng = RandomStreams(seed=seed)
     return rng.binomial(shape, p=p, dtype=dtype)
-
-'''
-more TODO:
-
-tensordot -> soon to be introduced in TF
-batched_tensordot -> reimplement
-'''

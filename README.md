@@ -8,7 +8,7 @@ The modifications are mainly about transplanting a CTC (*Connectionist Temporal 
 Question may be asked why not make a pull request for fchollet's Keras repository. The reason is that CTC cost is rather different from the existing objective functions in Keras, it requires different masking mechanism and not directly reflects accuracy. To avoid mass modification of Keras' current masking mechanism, I override Keras' '**sample_weights**' variable for '**seq_mask**' of CTC and Keras' '**masks**' variable for '**sm_mask**' of CTC. This should not cause problem for other network architecture or objective functions, but I lack resources to give it a thorough test.
 
 ## Functions
-[1] Till now, the following train/test functions works well with CTC cost:
+[1] Till now, the following train/test functions work well with CTC cost:
   * **train_on_batch()**
   * **test_on_batch()**
   * **predict_on_batch()**

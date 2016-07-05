@@ -12,8 +12,10 @@ Question may be asked why not make a pull request for fchollet's Keras repositor
   * **train_on_batch()**
   * **test_on_batch()**
   * **predict_on_batch()**
-  
+
 The modification of '**fit()**' function is in progress, but no definte schedule.
+
+To use CTC cost objective, set **loss = 'ctc_cost_for_train'** or **'ctc_cost_precise'** when compiling model.
 
 [2] For now, only '**loss**' metric works with CTC cost. For accuracy evaluation, you need to do the decoding and calculate the CER outside Keras.
 

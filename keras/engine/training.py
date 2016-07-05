@@ -588,7 +588,7 @@ class Model(Container):
         for i in range(len(self.outputs)):
             shape = self.internal_output_shapes[i]
             name = self.output_names[i]
-            if self.loss_functions[i].__name__.startswith('ctc'):
+            if self.loss_functions[i].__name__.startswith('ctc'):                        # [DV] add for ctc
                 ndim = len(shape)-1
             else:
                 ndim = len(shape)
@@ -679,7 +679,7 @@ class Model(Container):
         self.test_function = None
         self.predict_function = None
 
-    def _make_train_function(self):
+    def _make_train_function(self, **kwargs):                     # [DV] add 'kwargs' for ctc
         if not hasattr(self, 'train_function'):
             raise Exception('You must compile your model before using it.')
         if self.train_function is None:
@@ -702,10 +702,20 @@ class Model(Container):
             updates = self.updates + training_updates
 
             # returns loss and metrics. Updates weights at each call.
-            self.train_function = K.function(inputs,
-                                             [self.total_loss] + self.metrics,
-                                             updates=updates,
-                                             **self._function_kwargs)
+            return_sm = False                                                # [DV] add for ctc, return score matrix if required.
+            for key in kwargs:
+                if key == 'return_sm':
+                    return_sm = kwargs[key]
+            if return_sm == False:
+                self.train_function = K.function(inputs,
+                                                 [self.total_loss] + self.metrics,
+                                                 updates=updates,
+                                                 **self._function_kwargs)
+            else:
+                self.train_function = K.function(inputs,
+                                                 [self.total_loss] + self.metrics + self.outputs,
+                                                 updates=updates,
+                                                 **self._function_kwargs)
 
     def _make_test_function(self):
         if not hasattr(self, 'test_function'):
@@ -1209,7 +1219,7 @@ class Model(Container):
                                   batch_size=batch_size, verbose=verbose)
 
     def train_on_batch(self, x, y,
-                       sample_weight=None, class_weight=None,              # [DV] sample_weight可以作为ctc的sm_mask (B, T)
+                       sample_weight=None, class_weight=None,              # [DV] sample_weight可以作为ctc的seq_mask (B, L)
                        **kwargs):
         '''Runs a single gradient update on a single batch of data.
 
@@ -1253,9 +1263,11 @@ class Model(Container):
 
         sm_masks = []                                   # [DV] add for ctc
         for key in kwargs:
-            if key.startswith('sm_mask'):
+            if key == 'return_sm':
+                return_sm = kwargs[key]
+            elif key.startswith('sm_mask'):
                 sm_masks.append(kwargs[key])
-        if len(sm_masks) == 0:                          # [DV] handle default value of 'sm_mask'
+        if len(sm_masks) == 0:                          # [DV] handle default value of 'sm_mask' (B, T)
             for i in range(len(self.outputs)):
                 if self.masks[i] is not None:
                     x_element = x[i] if type(x) is list else x
@@ -1266,7 +1278,7 @@ class Model(Container):
         if len(sm_masks) > 0:
             ins += sm_masks
 
-        self._make_train_function()
+        self._make_train_function(return_sm=return_sm)
         outputs = self.train_function(ins)
         if len(outputs) == 1:
             return outputs[0]

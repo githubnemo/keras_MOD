@@ -287,8 +287,8 @@ def concatenate(tensors, axis=-1):
     return T.concatenate(tensors, axis=axis)
 
 
-def reshape(x, shape):
-    return T.reshape(x, shape)
+def reshape(x, shape, ndim=None):                # [DV] add ndim para
+    return T.reshape(x, shape, ndim)
 
 
 def permute_dimensions(x, pattern):
@@ -297,6 +297,12 @@ def permute_dimensions(x, pattern):
     pattern should be a tuple or list of
     dimension indices, e.g. [0, 2, 1].
     '''
+    if len(pattern) < x.ndim:                    # [DV] handle the case that one dimension is to be dropped
+        bcaxis = []
+        for i in range(x.ndim):
+            if i not in pattern:
+                bcaxis.append(i)
+        x = T.addbroadcast(x, *bcaxis)
     pattern = tuple(pattern)
     return x.dimshuffle(pattern)
 

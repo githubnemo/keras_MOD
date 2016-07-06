@@ -212,7 +212,7 @@ class Reshape(Layer):
         # 1) rely on x._keras_shape
         # 2) fallback: K.int_shape
         target_shape = self.target_shape
-        if -1 in target_shape:
+        if -1 in target_shape or None in target_shape:
             # target shape not fully defined
             input_shape = None
             if hasattr(x, '_keras_shape'):
@@ -264,10 +264,16 @@ class Permute(Layer):
 
     def get_output_shape_for(self, input_shape):
         input_shape = list(input_shape)
-        output_shape = copy.copy(input_shape)
-        for i, dim in enumerate(self.dims):
-            target_dim = input_shape[dim]
-            output_shape[i+1] = target_dim
+        output_shape = []                                     # [DV] handle the case input/output shapes not equal
+        dims = [0] + list(self.dims)
+        for i in dims:
+            output_shape.append(input_shape[i])
+        # output_shape = copy.copy(input_shape)
+        # for i, dim in enumerate(self.dims):
+        #     target_dim = input_shape[dim]
+        #     output_shape[i+1] = target_dim
+        print('@Line277, input_shape = ', input_shape)
+        print('@line278, output_shape = ', output_shape)
         return tuple(output_shape)
 
     def call(self, x, mask=None):

@@ -19,7 +19,8 @@ To use CTC cost objective, set **loss = 'ctc_cost_for_train'** or **'ctc_cost_pr
 
 [2] For now, only '**loss**' metric works with CTC cost. For accuracy evaluation, you need to do the decoding and calculate the CER outside Keras.
 
-[3] '**Flatten**' class is modified to work with FCN (*Fully Convoluational Network*)
+[3] '**Flatten**' class is modified to work with FCN (*Fully Convolutional Network*)
+[4] '**Permute**' class is modified to work with FCRN (*Fully Convolutional Recurrent Network*)
 
 ## Usage Guide
 *TODO*

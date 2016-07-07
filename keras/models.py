@@ -492,12 +492,12 @@ class Sequential(Model):
                           'the model at compile time:\n'
                           '`model.compile(optimizer, loss, '
                           'metrics=["accuracy"])`')
-        if kwargs:
-            raise Exception('Received unknown keyword arguments: ' +
-                            str(kwargs))
+        # if kwargs:
+        #     raise Exception('Received unknown keyword arguments: ' +
+        #                     str(kwargs))
         return self.model.train_on_batch(x, y,
                                          sample_weight=sample_weight,
-                                         class_weight=class_weight)
+                                         class_weight=class_weight, **kwargs)
 
     def test_on_batch(self, x, y,
                       sample_weight=None, **kwargs):

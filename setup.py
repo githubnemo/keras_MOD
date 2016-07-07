@@ -14,4 +14,6 @@ setup(name='Keras',
       extras_require={
           'h5py': ['h5py'],
       },
+      MOD_author='David Leon (Dawei Leng)'
+      zip_safe=False,
       packages=find_packages())

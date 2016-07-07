@@ -297,14 +297,18 @@ class Flatten(Layer):
         self.input_spec = [InputSpec(ndim='3+')]
         super(Flatten, self).__init__(**kwargs)
 
+    # def get_output_shape_for(self, input_shape):
+    #     if not all(input_shape[1:]):
+    #         raise Exception('The shape of the input to "Flatten" '
+    #                         'is not fully defined '
+    #                         '(got ' + str(input_shape[1:]) + '. '
+    #                         'Make sure to pass a complete "input_shape" '
+    #                         'or "batch_input_shape" argument to the first '
+    #                         'layer in your model.')
+    #     return (input_shape[0], np.prod(input_shape[1:]))
     def get_output_shape_for(self, input_shape):
         if not all(input_shape[1:]):
-            raise Exception('The shape of the input to "Flatten" '
-                            'is not fully defined '
-                            '(got ' + str(input_shape[1:]) + '. '
-                            'Make sure to pass a complete "input_shape" '
-                            'or "batch_input_shape" argument to the first '
-                            'layer in your model.')
+            return (input_shape[0], None)
         return (input_shape[0], np.prod(input_shape[1:]))
 
     def call(self, x, mask=None):
@@ -460,9 +464,9 @@ class Lambda(Layer):
 
         if isinstance(self._output_shape, python_types.LambdaType):
             if py3:
-                output_shape = marshal.dumps(self._output_shape.__code__)
+                output_shape = marshal.dumps(self._output_shape.__code__).decode('raw_unicode_escape')
             else:
-                output_shape = marshal.dumps(self._output_shape.func_code)
+                output_shape = marshal.dumps(self._output_shape.func_code).decode('raw_unicode_escape')
             output_shape_type = 'lambda'
         elif callable(self._output_shape):
             output_shape = self._output_shape.__name__
@@ -494,7 +498,7 @@ class Lambda(Layer):
         if output_shape_type == 'function':
             output_shape = globals()[config['output_shape']]
         elif output_shape_type == 'lambda':
-            output_shape = marshal.loads(config['output_shape'])
+            output_shape = marshal.loads(config['output_shape'].encode('raw_unicode_escape'))
             output_shape = python_types.FunctionType(output_shape, globals())
         else:
             output_shape = config['output_shape']
@@ -1009,8 +1013,8 @@ class TimeDistributedDense(Layer):
                  W_regularizer=None, b_regularizer=None, activity_regularizer=None,
                  W_constraint=None, b_constraint=None,
                  bias=True, input_dim=None, input_length=None, **kwargs):
-        warnings.warn('TimeDistributedDense is deprecated, '
-                      'please use TimeDistributed(Dense(...)) instead.')
+        # warnings.warn('TimeDistributedDense is deprecated, '
+                      # 'please use TimeDistributed(Dense(...)) instead.')
         self.output_dim = output_dim
         self.init = initializations.get(init)
         self.activation = activations.get(activation)
